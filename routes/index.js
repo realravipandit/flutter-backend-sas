@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 
+const healthRoute = require("./health");
 const authenticateToken = require("../middlewares/auth");
 
 // Import all route modules
@@ -18,6 +19,8 @@ const itemRoutes = require("./itemRoutes");
 const cashBankRoutes = require('./cashBankRoutes');
 const voucherRoutes = require('./voucherRoutes');
 const documentRoutes = require('./documentRoutes');
+
+router.use("/health", healthRoute);
 
 // 1. PUBLIC ROUTES (No token required)
 router.use("/", authRoutes);
