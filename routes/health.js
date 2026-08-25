@@ -2,7 +2,8 @@ const express = require("express");
 const router = express.Router();
 
 // No auth required — this must be reachable before login,
-// on any client's server (private or public).
+// on any client's server (private or public).url or ip:port
+
 router.get("/", (req, res) => {
   res.status(200).json({ status: "ok" });
 });
