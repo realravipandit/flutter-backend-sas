@@ -19,6 +19,7 @@ const itemRoutes = require("./itemRoutes");
 const cashBankRoutes = require('./cashBankRoutes');
 const voucherRoutes = require('./voucherRoutes');
 const documentRoutes = require('./documentRoutes');
+const stockLedgerRoutes = require('./stockLedgerRoutes');
 
 router.use("/health", healthRoute);
 
@@ -36,6 +37,7 @@ router.use("/", outstandingRoutes);
 router.use("/dashboard", dashboardRoutes);
 router.use("/ageing", ageingRoutes);
 router.use('/ledgers', ledgerRoutes);
+router.use('/stock-ledger', stockLedgerRoutes);
 router.use("/items", itemRoutes);
 router.use('/cash-bank', cashBankRoutes);
 router.use('/vouchers', voucherRoutes);
