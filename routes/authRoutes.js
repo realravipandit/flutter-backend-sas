@@ -2,8 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { getCentralPool, sql } = require("../db");
 const jwt = require("jsonwebtoken");
-const bcrypt = require("bcrypt");
-const { isBcryptHash, decryptLegacyBuffer } = require("../utils/legacyCipher");
+const { decryptLegacyBuffer } = require("../utils/legacyCipher"); 
 
 router.post("/login", async (req, res) => {
   const { username, password, centralDatabase } = req.body;
@@ -18,7 +17,6 @@ router.post("/login", async (req, res) => {
       return res.status(503).json({ error: "Database unavailable" });
     }
 
-    // CAST to VARBINARY to retrieve exact byte values without charset corruption
     const result = await pool.request()
       .input('username', sql.VarChar, username)
       .query(`
@@ -27,7 +25,6 @@ router.post("/login", async (req, res) => {
           UserCode, 
           UserName, 
           UserType, 
-          UserPassword,
           CAST(UserPassword AS VARBINARY(MAX)) AS UserPasswordBytes
         FROM tblUser 
         WHERE UserName = @username
@@ -38,43 +35,24 @@ router.post("/login", async (req, res) => {
     }
 
     const user = result.recordset[0];
-    const stored = user.UserPassword || '';
     const storedBytes = user.UserPasswordBytes;
-
+    
     let validPassword = false;
 
-    // 1. Check if already migrated to Bcrypt
-    if (isBcryptHash(stored)) {
-      validPassword = await bcrypt.compare(password, stored);
-    } else {
-      // 2. Decode raw bytes with legacy byte-inversion
-      try {
-        const decoded = decryptLegacyBuffer(storedBytes);
-        validPassword = (decoded === password);
-
-        // 3. Lazy migration on successful match
-        if (validPassword) {
-          const newHash = await bcrypt.hash(password, 10);
-          await pool.request()
-            .input('userId', sql.Int, user.UserID)
-            .input('newHash', sql.VarChar, newHash)
-            .query(`
-              UPDATE tblUser 
-              SET UserPassword = @newHash 
-              WHERE UserID = @userId
-            `);
-          console.log(`✅ Successfully migrated password for user: ${username}`);
-        }
-      } catch (decodeError) {
-        console.error(`⚠️ Failed to decode legacy password for ${username}:`, decodeError.message);
-        validPassword = false;
-      }
+    // STRICT PURE LEGACY VALIDATION ONLY
+    try {
+      const decodedRaw = decryptLegacyBuffer(storedBytes);
+      const decoded = decodedRaw.replace(/[^\x20-\x7E]/g, '');
+      validPassword = (decoded === password);
+    } catch (decodeError) {
+      validPassword = false;
     }
 
     if (!validPassword) {
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
+    const jwtSecret = process.env.JWT_SECRET || "temporary_fallback_secret_key_12345";
     const accessToken = jwt.sign(
       {
         userId: user.UserID,
@@ -82,7 +60,7 @@ router.post("/login", async (req, res) => {
         role: user.UserType,
         centralDatabase: targetDb
       },
-      process.env.JWT_SECRET,
+      jwtSecret,
       { expiresIn: '8h' }
     );
 
