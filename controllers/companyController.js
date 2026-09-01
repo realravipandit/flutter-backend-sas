@@ -1,6 +1,8 @@
 const { getCentralPool, getPool, sql } = require("../db");
 
 // 1. Get all companies assigned to the user
+// 1. Get all companies assigned to the user
+// 1. Get all companies assigned to the user
 const getCompanies = async (req, res) => {
   try {
     const userId = req.user && req.user.userId;
@@ -8,14 +10,21 @@ const getCompanies = async (req, res) => {
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
     const pool = await getCentralPool(centralDatabase);
+    
+    // Kept DISTINCT to stop JOIN duplicates, but removed the [CompanyCode] text
     const result = await pool.request().input("userId", sql.Int, userId).query(`
-        SELECT c.CompanyID, c.CompanyCode, c.CompanyName
+        SELECT DISTINCT 
+          c.CompanyID, 
+          c.CompanyCode, 
+          c.CompanyName
         FROM tblCompanyMaster c
         JOIN tblCompanyRights cr ON c.CompanyID = cr.CompanyID
         WHERE cr.UserID = @userId
       `);
+      
     res.json(result.recordset);
   } catch (error) {
+    console.error("Error fetching companies:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };

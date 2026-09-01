@@ -20,6 +20,7 @@
     "express": "^4.21.2",
     "express-rate-limit": "^8.6.0",
     "helmet": "^8.3.0",
+    "iconv-lite": "^0.7.3",
     "jsonwebtoken": "^9.0.3",
     "mssql": "^11.0.1",
     "nepali-date-converter": "^3.4.0"
