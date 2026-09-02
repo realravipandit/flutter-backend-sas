@@ -27,7 +27,7 @@ router.post("/login", async (req, res) => {
           UserType, 
           CAST(UserPassword AS VARBINARY(MAX)) AS UserPasswordBytes
         FROM tblUser 
-        WHERE UserName = @username
+        WHERE UserCode = @username
       `);
 
     if (result.recordset.length === 0) {
