@@ -69,8 +69,8 @@ const getSalesList = async (req) => {
             ) AS termsJson
         FROM tblSIMaster m
         LEFT JOIN tblLedger l ON m.LedgerID = l.LedgerID
-        ${whereClause}
-        ORDER BY ${orderBy}
+ ${whereClause}
+ORDER BY ${orderBy}
         OFFSET @offset ROWS
         FETCH NEXT @limit ROWS ONLY;
     `;
@@ -78,12 +78,12 @@ const getSalesList = async (req) => {
     // --- Count Query ---
     const countRequest = pool.request();
     const countWhereClause = buildSalesFilters(req.query, countRequest, sql);
-    
+
     const countQuery = `
         SELECT COUNT(*) AS total
         FROM tblSIMaster m
         LEFT JOIN tblLedger l ON m.LedgerID = l.LedgerID
-        ${countWhereClause};
+ ${countWhereClause};
     `;
 
     // --- Execute Queries Concurrently ---
@@ -116,6 +116,7 @@ const getSalesList = async (req) => {
         }
 
         const { itemsJson, termsJson, ...masterData } = row;
+
         return {
             ...masterData,
             items: parsedItems,
@@ -128,8 +129,8 @@ const getSalesList = async (req) => {
     const totalPages = total > 0 ? Math.ceil(total / pagination.limit) : 0;
 
     return {
-        records, 
-        data: records, 
+        records,
+        data: records,
         pagination: {
             page: pagination.page,
             limit: pagination.limit,
@@ -165,15 +166,24 @@ const getSalesDetails = async (req) => {
         throw new Error("Voucher ID is required.");
     }
 
-    // --- Master Record ---
+    // --- Master Record (+ customer address, + counter/class name) ---
     const masterRes = await pool
         .request()
         .input("VoucherID", sql.VarChar(50), voucherId)
         .query(`
-            SELECT *
-            FROM tblSIMaster
-            WHERE VoucherID = @VoucherID
+            SELECT
+                m.*,
+                l.LedgerAddress AS customerAddress,
+                c.ClassName AS counterName
+            FROM tblSIMaster m
+            LEFT JOIN tblLedger l ON m.LedgerID = l.LedgerID
+            LEFT JOIN tblClass c ON m.ClassID = c.ClassID
+            WHERE m.VoucherID = @VoucherID
         `);
+
+    if (!masterRes.recordset.length) {
+        throw new Error(`Sale record ${voucherId} not found.`);
+    }
 
     // --- Detail Items ---
     const detailsRes = await pool
@@ -193,7 +203,7 @@ const getSalesDetails = async (req) => {
         .request()
         .input("VoucherID", sql.VarChar(50), voucherId)
         .query(`
-            SELECT 
+            SELECT
                 [Term Name] AS TermName,
                 [Term Rate] AS Rate,
                 [Term Amount] AS Amount,
@@ -202,8 +212,30 @@ const getSalesDetails = async (req) => {
             WHERE [Voucher No] = @VoucherID
         `);
 
+    // --- Resolve Invoice Type (SB / Tax / Abbr) from voucher prefix ---
+    const seqRes = await pool.request().query(`
+        SELECT Module, DocumentName, ISNULL(POSSequence, '') AS POSSequence, Prefix
+        FROM tblVoucherSequences
+        WHERE Module IN ('SB', 'CS') AND Prefix IS NOT NULL AND Prefix <> ''
+    `);
+
+    const match = seqRes.recordset
+        .filter(r => voucherId.startsWith(r.Prefix))
+        .sort((a, b) => b.Prefix.length - a.Prefix.length)[0];
+
+    let type = 'Unknown';
+    if (match) {
+        if (match.Module === 'SB') {
+            type = 'SB';
+        } else {
+            type = (match.POSSequence || '').toLowerCase() === 'tax' ? 'Tax' : 'Abbr';
+        }
+    }
+
+    const master = { ...masterRes.recordset[0], type };
+
     return {
-        master: masterRes.recordset[0] || {},
+        master,
         items: detailsRes.recordset,
         terms: termsRes.recordset
     };
@@ -238,7 +270,7 @@ const getSalesSummary = async (req) => {
         FROM tblSIDetails d
         LEFT JOIN tblSIMaster m ON m.VoucherID = d.VoucherID
         LEFT JOIN tblLedger l ON m.LedgerID = l.LedgerID
-        ${whereClause}
+ ${whereClause}
     `);
 
     return result.recordset[0] || { salesQty: 0, salesAmount: 0, quantity: 0, totalAmount: 0 };

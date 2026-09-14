@@ -1,8 +1,6 @@
 const { getCentralPool, getPool, sql } = require("../db");
 
 // 1. Get all companies assigned to the user
-// 1. Get all companies assigned to the user
-// 1. Get all companies assigned to the user
 const getCompanies = async (req, res) => {
   try {
     const userId = req.user && req.user.userId;

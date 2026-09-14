@@ -8,6 +8,7 @@ const baseConfig = {
   options: {
     encrypt: false,
     trustServerCertificate: true,
+    useUTC:false,
   },
 };
 

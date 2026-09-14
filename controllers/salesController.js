@@ -1,10 +1,7 @@
 const salesService = require("../services/salesService");
 const salesReportService = require("../services/reports/salesReportService");
-const salesOrderService = require("../services/salesOrderService"); // ✅ Imported properly
+const salesOrderService = require("../services/salesOrderService");
 
-// ─────────────────────────────────────────────────────────────
-// SALES REPORTS & LISTS
-// ─────────────────────────────────────────────────────────────
 const getSalesSummary = async (req, res) => {
     try {
         const result = await salesReportService.getSalesSummary(req);
@@ -35,18 +32,8 @@ const getSalesDetails = async (req, res) => {
     }
 };
 
-// ─────────────────────────────────────────────────────────────
-// SALES INVOICE (SB) ENTRY
-// ─────────────────────────────────────────────────────────────
 const createSale = async (req, res) => {
     try {
-        if (process.env.NODE_ENV !== "production") {
-            console.log("══════════════════════════════════════════");
-            console.log("NEW SALE REQUEST");
-            console.log("Company :", req.headers["x-company-code"]);
-            console.log("Body :", JSON.stringify(req.body, null, 2));
-            console.log("══════════════════════════════════════════");
-        }
         const result = await salesService.createSale(req);
         res.status(200).json(result);
     } catch (err) {
@@ -75,9 +62,6 @@ const getTermMasters = async (req, res) => {
     }
 };
 
-// ─────────────────────────────────────────────────────────────
-// SALES ORDER (SO) ENTRY & VOUCHER GENERATION
-// ─────────────────────────────────────────────────────────────
 const getNextSalesOrderNumber = async (req, res) => {
     try {
         const result = await salesOrderService.getNextSalesOrderNumber(req);
@@ -90,13 +74,6 @@ const getNextSalesOrderNumber = async (req, res) => {
 
 const createSalesOrder = async (req, res) => {
     try {
-        if (process.env.NODE_ENV !== "production") {
-            console.log("══════════════════════════════════════════");
-            console.log("NEW SALES ORDER REQUEST");
-            console.log("Company :", req.headers["x-company-code"]);
-            console.log("Body :", JSON.stringify(req.body, null, 2));
-            console.log("══════════════════════════════════════════");
-        }
         const result = await salesOrderService.createSalesOrder(req);
         res.status(200).json(result);
     } catch (err) {
