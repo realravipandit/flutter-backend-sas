@@ -1,9 +1,6 @@
 const { getPool, sql } = require("../../db");
-
 const { buildSalesFilters } = require("../../utils/reports/reportFilters");
-
 const { buildSalesSort } = require("../../utils/reports/reportSort");
-
 const { buildPagination } = require("../../utils/reports/reportPagination");
 
 // =========================================
@@ -21,11 +18,24 @@ function toLocalDateString(date) {
 }
 
 // =========================================
+// TIME HELPER
+// Same idea as toLocalDateString, but preserves the full
+// timestamp (hours/minutes/seconds) since VoucherTime is a genuine
+// creation-time column for Sales (shown to the user), not just a
+// date paired with a throwaway time-of-day.
+// =========================================
+function toLocalDateTimeString(date) {
+    if (!date) return null;
+    if (typeof date === 'string') return date;
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ` +
+        `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
+}
+
+// =========================================
 // GET SALES LIST
 // List + Filtering + Sorting + Pagination
 // =========================================
 const getSalesList = async (req) => {
-
     // --- Validate Company ---
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) {
@@ -53,16 +63,16 @@ const getSalesList = async (req) => {
     const pagination = buildPagination(page, limit, request, sql);
 
     // --- Main Sales Query (Using exact View_DynamicSITerms column mapping) ---
-    // 👉 FIX: VoucherDate is CONVERTed to a plain 'YYYY-MM-DD' string in
-    // SQL, so no native DATETIME ever becomes a JS Date object here ---
-    // that's what was getting UTC-serialized and shown a day behind
-    // once it reached the client.
+    // 👉 FIX: VoucherDate and VoucherTime are both CONVERTed to plain
+    // strings in SQL, so no native DATETIME ever becomes a JS Date
+    // object here --- that's what was getting UTC-serialized and
+    // shown a day/hours off once it reached the client.
     const query = `
         SELECT
             m.VoucherID AS id,
             m.VoucherID,
             CONVERT(varchar(10), m.VoucherDate, 23) AS VoucherDate,
-            ISNULL(m.VoucherTime, '00:00:00') AS VoucherTime,
+            CONVERT(varchar(19), m.VoucherTime, 120) AS VoucherTime,
             ISNULL(NULLIF(m.PartyName, ''), l.LedgerName) AS customerName,
             m.VoucherID AS invoiceNumber,
             m.NetAmount AS totalAmount,
@@ -139,7 +149,6 @@ ORDER BY ${orderBy}
         }
 
         const { itemsJson, termsJson, ...masterData } = row;
-
         return {
             ...masterData,
             items: parsedItems,
@@ -171,7 +180,6 @@ ORDER BY ${orderBy}
 // Single Voucher
 // =========================================
 const getSalesDetails = async (req) => {
-
     // --- Validate Company ---
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) {
@@ -258,12 +266,14 @@ const getSalesDetails = async (req) => {
         }
     }
 
-    // 👉 FIX: reformat VoucherDate (and VoucherTime, if it's also a raw
-    // Date/time object rather than a string) using local getters before
-    // returning, so this single-voucher view doesn't have the same
-    // UTC-shift issue as the list view.
+    // 👉 FIX: reformat VoucherDate and VoucherTime using local getters
+    // before returning, so this single-voucher view doesn't have the
+    // same UTC-shift issue as the list view. VoucherTime keeps its
+    // full hh:mm:ss since it's a genuine creation-timestamp column
+    // shown to the user for Sales (unlike Purchase).
     const master = { ...masterRes.recordset[0], type };
     master.VoucherDate = toLocalDateString(master.VoucherDate);
+    master.VoucherTime = toLocalDateTimeString(master.VoucherTime);
 
     return {
         master,
@@ -276,7 +286,6 @@ const getSalesDetails = async (req) => {
 // GET SALES SUMMARY (Top Widgets)
 // =========================================
 const getSalesSummary = async (req) => {
-
     // --- Validate Company ---
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) {

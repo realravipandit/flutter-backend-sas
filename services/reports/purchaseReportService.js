@@ -4,6 +4,33 @@ const { buildPurchaseSort } = require("../../utils/reports/reportSort");
 const { buildPagination } = require("../../utils/reports/reportPagination");
 
 // =========================================
+// DATE HELPER
+// Converts a JS Date (or already-a-string) into a plain
+// 'YYYY-MM-DD' string using LOCAL getters --- never toISOString(),
+// which always renders in UTC and caused the day-shift bug on the
+// Windows Server (Nepal, UTC+5:45) once db.js's useUTC:false setting
+// produced a Date object internally shifted by that offset.
+// =========================================
+function toLocalDateString(date) {
+    if (!date) return null;
+    if (typeof date === 'string') return date;
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+// =========================================
+// TIME HELPER
+// Same idea as toLocalDateString, but preserves the full
+// timestamp (hours/minutes/seconds) --- VoucherTime is the real
+// system entry time and needs to display correctly for Purchase too.
+// =========================================
+function toLocalDateTimeString(date) {
+    if (!date) return null;
+    if (typeof date === 'string') return date;
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ` +
+        `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
+}
+
+// =========================================
 // GET PURCHASE SUMMARY / LIST
 // List + Filtering + Sorting + Pagination
 // =========================================
@@ -35,12 +62,16 @@ const getPurchaseSummary = async (req) => {
     const pagination = buildPagination(page, limit, request, sql);
 
     // --- Main Purchase Query (Using FOR JSON PATH for Items & Dynamic Terms) ---
+    // 👉 FIX: VoucherDate and VoucherTime are both CONVERTed to plain
+    // strings in SQL, so no native DATETIME becomes a JS Date object
+    // here (that's what was getting UTC-serialized and shown off by
+    // ~5:45 hours on the client).
     const query = `
         SELECT
             m.VoucherID AS id,
             m.VoucherID,
-            m.VoucherDate,
-            ISNULL(m.VoucherTime, '00:00:00') AS VoucherTime,
+            CONVERT(varchar(10), m.VoucherDate, 23) AS VoucherDate,
+            CONVERT(varchar(19), m.VoucherTime, 120) AS VoucherTime,
             ISNULL(NULLIF(m.PartyName, ''), l.LedgerName) AS supplierName,
             m.PartyBillID AS invoiceNumber,
             m.NetAmount AS totalAmount,
@@ -69,8 +100,8 @@ const getPurchaseSummary = async (req) => {
             ) AS termsJson
         FROM tblPIMaster m
         LEFT JOIN tblLedger l ON m.LedgerID = l.LedgerID
-        ${whereClause}
-        ORDER BY ${orderBy}
+ ${whereClause}
+ORDER BY ${orderBy}
         OFFSET @offset ROWS
         FETCH NEXT @limit ROWS ONLY;
     `;
@@ -78,12 +109,11 @@ const getPurchaseSummary = async (req) => {
     // --- Count Query ---
     const countRequest = pool.request();
     const countWhereClause = buildPurchaseFilters(req.query, countRequest, sql);
-
     const countQuery = `
         SELECT COUNT(*) AS total
         FROM tblPIMaster m
         LEFT JOIN tblLedger l ON m.LedgerID = l.LedgerID
-        ${countWhereClause};
+ ${countWhereClause};
     `;
 
     // --- Execute Queries Concurrently ---
@@ -116,7 +146,6 @@ const getPurchaseSummary = async (req) => {
         }
 
         const { itemsJson, termsJson, ...masterData } = row;
-
         return {
             ...masterData,
             items: parsedItems,
@@ -194,7 +223,7 @@ const getPurchaseDetails = async (req) => {
         .request()
         .input("VoucherID", sql.VarChar(50), voucherId)
         .query(`
-            SELECT 
+            SELECT
                 [Term Name] AS TermName,
                 [Term Rate] AS Rate,
                 [Term Amount] AS Amount,
@@ -205,8 +234,17 @@ const getPurchaseDetails = async (req) => {
             )
         `);
 
+    // 👉 FIX: reformat VoucherDate and VoucherTime using local getters
+    // before returning, so this single-voucher view doesn't have the
+    // same UTC-shift issue as the list view.
+    const master = masterRes.recordset.length ? { ...masterRes.recordset[0] } : {};
+    if (masterRes.recordset.length) {
+        master.VoucherDate = toLocalDateString(master.VoucherDate);
+        master.VoucherTime = toLocalDateTimeString(master.VoucherTime);
+    }
+
     return {
-        master: masterRes.recordset[0] || {},
+        master,
         items: detailsRes.recordset,
         terms: termsRes.recordset
     };

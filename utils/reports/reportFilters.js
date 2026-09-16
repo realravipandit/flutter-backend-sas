@@ -3,27 +3,17 @@
 // =========================================
 const buildPurchaseFilters = (query, request, sql) => {
     const conditions = [];
-    const { period, startDate, endDate, search, party } = query;
+    const { startDate, endDate, search, party } = query;
 
-    // --- DATE / PERIOD FILTER ---
-    if (period) {
-        switch (period) {
-            case "Today":
-                conditions.push(`CAST(m.VoucherDate AS DATE) = CAST(GETDATE() AS DATE)`); break;
-            case "Yesterday":
-                conditions.push(`CAST(m.VoucherDate AS DATE) = CAST(DATEADD(DAY, -1, GETDATE()) AS DATE)`); break;
-            case "Last 7 Days":
-                conditions.push(`m.VoucherDate >= DATEADD(DAY, -7, GETDATE())`); break;
-            case "Last 30 Days":
-                conditions.push(`m.VoucherDate >= DATEADD(DAY, -30, GETDATE())`); break;
-            case "This Month":
-                conditions.push(`m.VoucherDate >= DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1)`); break;
-            case "Last Month":
-                conditions.push(`m.VoucherDate >= DATEADD(MONTH, DATEDIFF(MONTH, 0, GETDATE()) - 1, 0) AND m.VoucherDate < DATEADD(MONTH, DATEDIFF(MONTH, 0, GETDATE()), 0)`); break;
-        }
-    }
-
-    // --- CUSTOM DATE RANGE ---
+    // --- DATE RANGE ---
+    // 👉 The old `period` string-matching switch was removed here.
+    // PurchaseScreen's filter chips already compute real startDate/
+    // endDate for every quick-filter option (Today, Yesterday, This
+    // Week, Last Week, etc.) before calling the API, so the switch
+    // was dead code — and it was missing cases for "This Week"/
+    // "Last Week", which would have silently returned unfiltered
+    // results if anything ever relied on it. Just handle explicit
+    // dates now.
     if (startDate && endDate) {
         conditions.push(`CAST(m.VoucherDate AS DATE) BETWEEN @startDate AND @endDate`);
         request.input("startDate", sql.Date, startDate);
@@ -52,33 +42,18 @@ const buildPurchaseFilters = (query, request, sql) => {
     return `WHERE ${conditions.join(" AND ")}`;
 };
 
-
 // =========================================
-// SALES REPORT FILTERS (NEW)
+// SALES REPORT FILTERS
 // =========================================
 const buildSalesFilters = (query, request, sql) => {
     const conditions = [];
-    const { period, startDate, endDate, search, party } = query;
+    const { startDate, endDate, search, party } = query;
 
-    // --- DATE / PERIOD FILTER ---
-    if (period) {
-        switch (period) {
-            case "Today":
-                conditions.push(`CAST(m.VoucherDate AS DATE) = CAST(GETDATE() AS DATE)`); break;
-            case "Yesterday":
-                conditions.push(`CAST(m.VoucherDate AS DATE) = CAST(DATEADD(DAY, -1, GETDATE()) AS DATE)`); break;
-            case "Last 7 Days":
-                conditions.push(`m.VoucherDate >= DATEADD(DAY, -7, GETDATE())`); break;
-            case "Last 30 Days":
-                conditions.push(`m.VoucherDate >= DATEADD(DAY, -30, GETDATE())`); break;
-            case "This Month":
-                conditions.push(`m.VoucherDate >= DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1)`); break;
-            case "Last Month":
-                conditions.push(`m.VoucherDate >= DATEADD(MONTH, DATEDIFF(MONTH, 0, GETDATE()) - 1, 0) AND m.VoucherDate < DATEADD(MONTH, DATEDIFF(MONTH, 0, GETDATE()), 0)`); break;
-        }
-    }
-
-    // --- CUSTOM DATE RANGE ---
+    // --- DATE RANGE ---
+    // 👉 Same simplification as Purchase: SaleScreen's filter chips
+    // already compute real startDate/endDate for every quick-filter
+    // option, so the old `period` switch was dead code with the same
+    // missing-case gap.
     if (startDate && endDate) {
         conditions.push(`CAST(m.VoucherDate AS DATE) BETWEEN @startDate AND @endDate`);
         request.input("startDate", sql.Date, startDate);
