@@ -1,13 +1,31 @@
 const { getPool, sql } = require("../../db");
+
 const { buildSalesFilters } = require("../../utils/reports/reportFilters");
+
 const { buildSalesSort } = require("../../utils/reports/reportSort");
+
 const { buildPagination } = require("../../utils/reports/reportPagination");
+
+// =========================================
+// DATE HELPER
+// Converts a JS Date (or already-a-string) into a plain
+// 'YYYY-MM-DD' string using LOCAL getters --- never toISOString(),
+// which always renders in UTC and caused the one-day-behind bug
+// on the Windows Server (Nepal, UTC+5:45) once db.js's useUTC:false
+// setting produced a Date object internally shifted by that offset.
+// =========================================
+function toLocalDateString(date) {
+    if (!date) return null;
+    if (typeof date === 'string') return date;
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
 
 // =========================================
 // GET SALES LIST
 // List + Filtering + Sorting + Pagination
 // =========================================
 const getSalesList = async (req) => {
+
     // --- Validate Company ---
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) {
@@ -35,11 +53,15 @@ const getSalesList = async (req) => {
     const pagination = buildPagination(page, limit, request, sql);
 
     // --- Main Sales Query (Using exact View_DynamicSITerms column mapping) ---
+    // 👉 FIX: VoucherDate is CONVERTed to a plain 'YYYY-MM-DD' string in
+    // SQL, so no native DATETIME ever becomes a JS Date object here ---
+    // that's what was getting UTC-serialized and shown a day behind
+    // once it reached the client.
     const query = `
         SELECT
             m.VoucherID AS id,
             m.VoucherID,
-            m.VoucherDate,
+            CONVERT(varchar(10), m.VoucherDate, 23) AS VoucherDate,
             ISNULL(m.VoucherTime, '00:00:00') AS VoucherTime,
             ISNULL(NULLIF(m.PartyName, ''), l.LedgerName) AS customerName,
             m.VoucherID AS invoiceNumber,
@@ -149,6 +171,7 @@ ORDER BY ${orderBy}
 // Single Voucher
 // =========================================
 const getSalesDetails = async (req) => {
+
     // --- Validate Company ---
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) {
@@ -235,7 +258,12 @@ const getSalesDetails = async (req) => {
         }
     }
 
+    // 👉 FIX: reformat VoucherDate (and VoucherTime, if it's also a raw
+    // Date/time object rather than a string) using local getters before
+    // returning, so this single-voucher view doesn't have the same
+    // UTC-shift issue as the list view.
     const master = { ...masterRes.recordset[0], type };
+    master.VoucherDate = toLocalDateString(master.VoucherDate);
 
     return {
         master,
@@ -248,6 +276,7 @@ const getSalesDetails = async (req) => {
 // GET SALES SUMMARY (Top Widgets)
 // =========================================
 const getSalesSummary = async (req) => {
+
     // --- Validate Company ---
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) {
