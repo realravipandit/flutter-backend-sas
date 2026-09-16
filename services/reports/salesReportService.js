@@ -51,9 +51,11 @@ const getSalesList = async (req) => {
                     i.ItemName AS productName,
                     d.Qty,
                     d.Rate,
-                    d.NetAmount AS amount
+                    d.NetAmount AS amount,
+                    u.UnitName AS unit
                 FROM tblSIDetails d
                 LEFT JOIN tblItems i ON d.ItemID = i.ItemID
+                LEFT JOIN tblItemsUnit u ON d.UnitID = u.UnitID
                 WHERE d.VoucherID = m.VoucherID
                 FOR JSON PATH
             ) AS itemsJson,
@@ -78,7 +80,6 @@ ORDER BY ${orderBy}
     // --- Count Query ---
     const countRequest = pool.request();
     const countWhereClause = buildSalesFilters(req.query, countRequest, sql);
-
     const countQuery = `
         SELECT COUNT(*) AS total
         FROM tblSIMaster m
@@ -185,16 +186,18 @@ const getSalesDetails = async (req) => {
         throw new Error(`Sale record ${voucherId} not found.`);
     }
 
-    // --- Detail Items ---
+    // --- Detail Items (+ unit name) ---
     const detailsRes = await pool
         .request()
         .input("VoucherID", sql.VarChar(50), voucherId)
         .query(`
             SELECT
                 d.*,
-                i.ItemName AS productName
+                i.ItemName AS productName,
+                u.UnitName AS unit
             FROM tblSIDetails d
             LEFT JOIN tblItems i ON d.ItemID = i.ItemID
+            LEFT JOIN tblItemsUnit u ON d.UnitID = u.UnitID
             WHERE d.VoucherID = @VoucherID
         `);
 

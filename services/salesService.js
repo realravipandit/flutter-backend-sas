@@ -291,6 +291,20 @@ exports.createSale = async (req) => {
             .input("VoucherNo", sql.NVarChar(50), voucherId)
             .query(UpdateInvTransactionfromSalesInvoice);
 
+        // 5b. Recompute StockValue for the items just sold.
+        // UpdateInvTransactionfromSalesInvoice inserts each 'O' row with
+        // StockValue hardcoded to '0' — that's a legacy placeholder, not
+        // a bug in that script. SP_SMInvValue is the actual costing
+        // engine (FIFO / weighted-average / rate-table depending on each
+        // item's ValuationTech) and is what the legacy app relies on to
+        // fill in real cost. Scoped to just this sale's items so it
+        // doesn't reprice the whole table on every checkout. Runs inside
+        // the same transaction so it commits/rolls back with the sale.
+        const affectedItemIds = [...new Set(items.map(i => i.itemId))].join(',');
+        await new sql.Request(tx)
+            .input("ItemID", sql.VarChar(sql.MAX), affectedItemIds)
+            .query(`EXEC SP_SMInvValue @ItemID`);
+
         // 6. Handle Cash / Bank receipt voucher(s)
         await incrementVoucherSequence(tx, saleSequence.documentId, saleSequence.documentName);
 
