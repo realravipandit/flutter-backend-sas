@@ -35,6 +35,7 @@ async function validateItemsGodownsUnits(tx, items) {
     const itemIds = [...new Set(items.map(i => i.itemId).filter(id => id != null))];
     const godownIds = [...new Set(items.map(i => i.godownId).filter(id => id != null))];
     const unitIds = [...new Set(items.map(i => i.unitId).filter(id => id != null))];
+
     const req = new sql.Request(tx);
 
     if (itemIds.length > 0) {
@@ -44,6 +45,7 @@ async function validateItemsGodownsUnits(tx, items) {
             if (!foundItemIds.has(id)) throw new Error(`Item ID ${id} does not exist.`);
         }
     }
+
     if (godownIds.length > 0) {
         const godownCheck = await req.query(`SELECT GodownID FROM tblGodown WHERE GodownID IN (${godownIds.join(',')})`);
         const foundGodownIds = new Set(godownCheck.recordset.map(r => r.GodownID));
@@ -51,6 +53,7 @@ async function validateItemsGodownsUnits(tx, items) {
             if (!foundGodownIds.has(id)) throw new Error(`Godown ID ${id} does not exist.`);
         }
     }
+
     if (unitIds.length > 0) {
         const unitCheck = await req.query(`SELECT UnitID FROM tblItemsUnit WHERE UnitID IN (${unitIds.join(',')})`);
         const foundUnitIds = new Set(unitCheck.recordset.map(r => r.UnitID));
@@ -60,12 +63,23 @@ async function validateItemsGodownsUnits(tx, items) {
     }
 }
 
+// Shared customer-name resolution: PartyName unless it's blank/"cash",
+// in which case fall back to tblLedger.LedgerName via LedgerID.
+const CUSTOMER_NAME_EXPR = `
+    CASE
+        WHEN m.PartyName IS NULL OR LTRIM(RTRIM(m.PartyName)) = '' OR LOWER(LTRIM(RTRIM(m.PartyName))) = 'cash'
+            THEN l.LedgerName
+        ELSE m.PartyName
+    END
+`;
+
 // ─────────────────────────────────────────────────────────────
 // CREATE SALES ORDER
 // ─────────────────────────────────────────────────────────────
 exports.createSalesOrder = async (req) => {
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) throw new Error("Company not selected.");
+
     const pool = await getPool(companyCode);
     if (!pool) throw new Error("Database unavailable.");
 
@@ -93,7 +107,7 @@ exports.createSalesOrder = async (req) => {
         const orderDate = adDate ? new Date(adDate) : new Date();
         const orderTime = new Date();
 
-        let basicAmount = 0;          
+        let basicAmount = 0;
         let masterBasicAmount = 0;
         let billTermAmount = 0;
 
@@ -108,10 +122,10 @@ exports.createSalesOrder = async (req) => {
                     itemTermsTotal += (t.sign === '-') ? -amt : amt;
                 });
             }
+
             item.basicAmount = itemBasic;
             item.termAmount = itemTermsTotal;
             item.netAmount = itemBasic + itemTermsTotal;
-            
             masterBasicAmount += item.netAmount;
         });
 
@@ -136,8 +150,8 @@ exports.createSalesOrder = async (req) => {
             .input("classId2", sql.Int, classId2)
             .input("branchId", sql.Int, finalBranchId)
             .input("currencyId", sql.Int, finalCurrency)
-            .input("basicAmount", sql.Decimal(18, 4), masterBasicAmount) 
-            .input("termAmount", sql.Decimal(18, 4), billTermAmount)     
+            .input("basicAmount", sql.Decimal(18, 4), masterBasicAmount)
+            .input("termAmount", sql.Decimal(18, 4), billTermAmount)
             .input("netAmount", sql.Decimal(18, 4), netAmount)
             .input("tenderAmount", sql.Decimal(18, 4), 0)
             .input("returnAmount", sql.Decimal(18, 4), 0)
@@ -158,7 +172,8 @@ exports.createSalesOrder = async (req) => {
         // 2. Insert Items into tblSODetails & Item-Wise Terms into tblSOTerm
         let sno = 1;
         for (const item of items) {
-            item.sno = sno; 
+            item.sno = sno;
+
             await new sql.Request(tx)
                 .input("orderId", sql.NVarChar(50), orderId)
                 .input("sno", sql.Int, sno)
@@ -202,6 +217,7 @@ exports.createSalesOrder = async (req) => {
                         `);
                 }
             }
+
             sno++;
         }
 
@@ -235,6 +251,7 @@ exports.createSalesOrder = async (req) => {
                     if (i === items.length - 1) {
                         btAmount = Number((bAmount - distributedSoFar).toFixed(2));
                     }
+
                     distributedSoFar += btAmount;
 
                     await new sql.Request(tx)
@@ -257,14 +274,13 @@ exports.createSalesOrder = async (req) => {
         await incrementVoucherSequence(tx, soSequence.documentId, soSequence.documentName);
         await tx.commit();
 
-        return { 
-            success: true, 
-            voucherId: orderId, 
-            basicAmount: masterBasicAmount, 
+        return {
+            success: true,
+            voucherId: orderId,
+            basicAmount: masterBasicAmount,
             termAmount: billTermAmount,
             netAmount
         };
-
     } catch (err) {
         console.error("Sales Order Service Error:", err.message);
         if (tx && !tx._aborted) {
@@ -281,6 +297,7 @@ exports.getNextSalesOrderNumber = async (req) => {
     const pool = await getPool(req.headers["x-company-code"]);
     const tx = new sql.Transaction(pool);
     await tx.begin();
+
     try {
         const voucher = await getNextVoucher(tx, 'SO', null);
         await tx.commit();
@@ -297,11 +314,131 @@ exports.getNextSalesOrderNumber = async (req) => {
 exports.getTermMasters = async (req) => {
     const companyCode = req.headers['x-company-code'];
     if (!companyCode) throw new Error("Company code required");
+
     const pool = await getPool(companyCode);
     const result = await pool.request().query(`
         SELECT TermID, TermName, Rate, Sign, LedgerID, ISNULL(ItemWise, 'N') AS ItemWise
         FROM tblSITermMaster
         ORDER BY TermID ASC
     `);
-    return result.recordset; 
+    return result.recordset;
+};
+
+// ─────────────────────────────────────────────────────────────
+// GET SALES ORDERS (LIST)
+//
+// Powers the list screen. Customer name resolves via PartyName, falling
+// back to tblLedger.LedgerName when PartyName is blank/"Cash" (per the
+// same convention createSalesOrder uses when no customerName is given).
+// Status is IsAproved (Y/N) --- there's no separate status column.
+// Optional query params: page, pageSize (default 1 / 50), search (matches
+// OrderID or resolved customer name).
+// ─────────────────────────────────────────────────────────────
+exports.getSalesOrders = async (req) => {
+    const companyCode = req.headers["x-company-code"];
+    if (!companyCode) throw new Error("Company not selected.");
+
+    const pool = await getPool(companyCode);
+    if (!pool) throw new Error("Database unavailable.");
+
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize, 10) || 50));
+    const offset = (page - 1) * pageSize;
+    const search = (req.query.search || "").trim();
+
+    const request = pool.request()
+        .input("offset", sql.Int, offset)
+        .input("pageSize", sql.Int, pageSize);
+
+    let searchClause = "";
+    if (search) {
+        request.input("search", sql.NVarChar(100), `%${search}%`);
+        searchClause = `AND (m.OrderID LIKE @search OR ${CUSTOMER_NAME_EXPR} LIKE @search)`;
+    }
+
+    const result = await request.query(`
+        SELECT
+            m.OrderID           AS orderNumber,
+            m.OrderDate         AS orderDate,
+            ${CUSTOMER_NAME_EXPR} AS customerName,
+            m.IsAproved          AS isApproved,
+            m.NetAmount          AS total,
+            ISNULL(d.itemCount, 0) AS itemCount,
+            ISNULL(d.totalQty, 0)  AS totalQty
+        FROM tblSOMaster m
+        LEFT JOIN tblLedger l ON l.LedgerID = m.LedgerID
+        OUTER APPLY (
+            SELECT COUNT(*) AS itemCount, SUM(det.Qty) AS totalQty
+            FROM tblSODetails det
+            WHERE det.OrderID = m.OrderID
+        ) d
+        WHERE 1 = 1
+        ${searchClause}
+        ORDER BY m.OrderDate DESC, m.OrderID DESC
+        OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
+    `);
+
+    return { success: true, orders: result.recordset, page, pageSize };
+};
+
+// ─────────────────────────────────────────────────────────────
+// GET SALES ORDER BY ID (DETAIL)
+//
+// Powers the detail screen --- master row + line items, joined to
+// tblItems for the product name (tblSODetails only stores ItemID).
+// ─────────────────────────────────────────────────────────────
+exports.getSalesOrderById = async (req) => {
+    const companyCode = req.headers["x-company-code"];
+    if (!companyCode) throw new Error("Company not selected.");
+
+    const orderId = req.params.orderId;
+    if (!orderId) throw new Error("Order ID is required.");
+
+    const pool = await getPool(companyCode);
+    if (!pool) throw new Error("Database unavailable.");
+
+    const masterResult = await pool.request()
+        .input("orderId", sql.NVarChar(50), orderId)
+        .query(`
+            SELECT
+                m.OrderID AS orderNumber,
+                m.OrderDate AS orderDate,
+                ${CUSTOMER_NAME_EXPR} AS customerName,
+                m.IsAproved AS isApproved,
+                m.BasicAmount AS basicAmount,
+                m.TermAmount AS termAmount,
+                m.NetAmount AS total,
+                m.Remarks AS remarks
+            FROM tblSOMaster m
+            LEFT JOIN tblLedger l ON l.LedgerID = m.LedgerID
+            WHERE m.OrderID = @orderId
+        `);
+
+    if (!masterResult.recordset.length) {
+        throw new Error(`Sales order ${orderId} not found.`);
+    }
+
+        const itemsQuery = `
+        SELECT
+            det.Sno AS srNo,
+            det.ItemID AS itemId,
+            it.ItemName AS productName,
+            det.Qty AS quantity,
+            det.Rate AS unitPrice,
+            det.NetAmount AS lineTotal
+        FROM tblSODetails det
+        LEFT JOIN tblItems it ON it.ItemID = det.ItemID
+        WHERE det.OrderID = @orderId
+        ORDER BY det.Sno ASC
+    `;
+
+    const itemsResult = await pool.request()
+        .input("orderId", sql.NVarChar(50), orderId)
+        .query(itemsQuery);
+
+    return {
+        success: true,
+        order: masterResult.recordset[0],
+        lineItems: itemsResult.recordset
+    };
 };

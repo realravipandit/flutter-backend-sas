@@ -1,6 +1,5 @@
 const salesService = require("../services/salesService");
 const salesReportService = require("../services/reports/salesReportService");
-const salesOrderService = require("../services/salesOrderService");
 
 const getSalesSummary = async (req, res) => {
     try {
@@ -62,33 +61,11 @@ const getTermMasters = async (req, res) => {
     }
 };
 
-const getNextSalesOrderNumber = async (req, res) => {
-    try {
-        const result = await salesOrderService.getNextSalesOrderNumber(req);
-        res.status(200).json(result);
-    } catch (err) {
-        console.error("getNextSalesOrderNumber:", err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-};
-
-const createSalesOrder = async (req, res) => {
-    try {
-        const result = await salesOrderService.createSalesOrder(req);
-        res.status(200).json(result);
-    } catch (err) {
-        console.error("createSalesOrder:", err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-};
-
 module.exports = {
     getSalesSummary,
     getSalesList,
     getSalesDetails,
     createSale,
     getNextInvoiceNumber,
-    getTermMasters,
-    getNextSalesOrderNumber,
-    createSalesOrder
+    getTermMasters
 };

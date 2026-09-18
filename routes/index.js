@@ -1,12 +1,12 @@
 const express = require("express");
 const router = express.Router();
-
 const healthRoute = require("./health");
 const authenticateToken = require("../middlewares/auth");
 
 // Import all route modules
 const authRoutes = require("./authRoutes");
 const salesRoutes = require("./salesRoutes");
+const salesOrderRoutes = require("./salesOrderRoutes");
 const purchaseRoutes = require("./purchaseRoutes");
 const inventoryRoutes = require("./inventoryRoutes");
 const outstandingRoutes = require("./outstandingRoutes");
@@ -27,10 +27,11 @@ router.use("/health", healthRoute);
 router.use("/", authRoutes);
 
 // 2. PROTECTED ROUTES (Everything below requires a valid token)
-router.use(authenticateToken); 
+router.use(authenticateToken);
 
 router.use("/", companyRoutes);
-router.use("/", salesRoutes);             // Handles /sales and /sales-order
+router.use("/", salesRoutes);             // Handles /sales (standard + POS)
+router.use("/", salesOrderRoutes);        // Handles /sales-order
 router.use("/", purchaseRoutes);
 router.use("/", inventoryRoutes);
 router.use("/", outstandingRoutes);
@@ -45,7 +46,6 @@ router.use('/vouchers', voucherRoutes);
 // Receivables and Payables (Supporting both singular & plural to prevent 404s)
 router.get("/receivables", financeController.getReceivables);
 router.get("/receivable", financeController.getReceivables);  // ✅ Added singular alias
-
 router.get("/payables", financeController.getPayables);
 router.get("/payable", financeController.getPayables);      // ✅ Added singular alias
 
