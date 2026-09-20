@@ -1,8 +1,10 @@
 const { getPool, sql } = require("../db");
+
 const {
     getNextVoucher,
     incrementVoucherSequence,
 } = require("../utils/voucherSequence");
+
 const {
     resolveBranch,
 } = require("../utils/branchResolver");
@@ -10,6 +12,7 @@ const {
 // ─────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────
+
 async function getSystemSettings(tx) {
     const result = await new sql.Request(tx).query(`
         SELECT TOP 1 * FROM tblSystemSettings
@@ -76,6 +79,7 @@ const CUSTOMER_NAME_EXPR = `
 // ─────────────────────────────────────────────────────────────
 // CREATE SALES ORDER
 // ─────────────────────────────────────────────────────────────
+
 exports.createSalesOrder = async (req) => {
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) throw new Error("Company not selected.");
@@ -104,6 +108,7 @@ exports.createSalesOrder = async (req) => {
         // Sequence uses 'SO' for Sales Order
         const soSequence = await getNextVoucher(tx, "SO", finalBranchId);
         const orderId = soSequence.voucherId;
+
         const orderDate = adDate ? new Date(adDate) : new Date();
         const orderTime = new Date();
 
@@ -126,6 +131,7 @@ exports.createSalesOrder = async (req) => {
             item.basicAmount = itemBasic;
             item.termAmount = itemTermsTotal;
             item.netAmount = itemBasic + itemTermsTotal;
+
             masterBasicAmount += item.netAmount;
         });
 
@@ -217,7 +223,6 @@ exports.createSalesOrder = async (req) => {
                         `);
                 }
             }
-
             sno++;
         }
 
@@ -251,7 +256,6 @@ exports.createSalesOrder = async (req) => {
                     if (i === items.length - 1) {
                         btAmount = Number((bAmount - distributedSoFar).toFixed(2));
                     }
-
                     distributedSoFar += btAmount;
 
                     await new sql.Request(tx)
@@ -281,6 +285,7 @@ exports.createSalesOrder = async (req) => {
             termAmount: billTermAmount,
             netAmount
         };
+
     } catch (err) {
         console.error("Sales Order Service Error:", err.message);
         if (tx && !tx._aborted) {
@@ -293,11 +298,11 @@ exports.createSalesOrder = async (req) => {
 // ─────────────────────────────────────────────────────────────
 // GET NEXT SALES ORDER NUMBER
 // ─────────────────────────────────────────────────────────────
+
 exports.getNextSalesOrderNumber = async (req) => {
     const pool = await getPool(req.headers["x-company-code"]);
     const tx = new sql.Transaction(pool);
     await tx.begin();
-
     try {
         const voucher = await getNextVoucher(tx, 'SO', null);
         await tx.commit();
@@ -311,6 +316,7 @@ exports.getNextSalesOrderNumber = async (req) => {
 // ─────────────────────────────────────────────────────────────
 // GET TERM MASTERS (Reused for Orders)
 // ─────────────────────────────────────────────────────────────
+
 exports.getTermMasters = async (req) => {
     const companyCode = req.headers['x-company-code'];
     if (!companyCode) throw new Error("Company code required");
@@ -334,6 +340,7 @@ exports.getTermMasters = async (req) => {
 // Optional query params: page, pageSize (default 1 / 50), search (matches
 // OrderID or resolved customer name).
 // ─────────────────────────────────────────────────────────────
+
 exports.getSalesOrders = async (req) => {
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) throw new Error("Company not selected.");
@@ -384,9 +391,20 @@ exports.getSalesOrders = async (req) => {
 // ─────────────────────────────────────────────────────────────
 // GET SALES ORDER BY ID (DETAIL)
 //
-// Powers the detail screen --- master row + line items, joined to
-// tblItems for the product name (tblSODetails only stores ItemID).
+// Powers the detail screen --- master row + line items + bill terms.
+// Line items are joined to tblItems for the product name (tblSODetails
+// only stores ItemID) and tblItemsUnit for the unit code.
+//
+// Bill terms come from tblSOTerm rows with TermType = 'B' (the
+// bill-level rows written by createSalesOrder). The 'P' (item-wise) and
+// 'BT' (per-item apportionment) rows are NOT returned here --- item-wise
+// terms are returned separately, attached to their line as `itemTerms`
+// (matched on Sno), and 'BT' rows are just the bill terms split across
+// items, so including them would double count. tblSOTerm.Amount is stored
+// as an absolute value, so the sign ('+' / '-') is taken from
+// tblSITermMaster.Sign.
 // ─────────────────────────────────────────────────────────────
+
 exports.getSalesOrderById = async (req) => {
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) throw new Error("Company not selected.");
@@ -403,6 +421,7 @@ exports.getSalesOrderById = async (req) => {
             SELECT
                 m.OrderID AS orderNumber,
                 m.OrderDate AS orderDate,
+                m.OrderMiti AS miti,
                 ${CUSTOMER_NAME_EXPR} AS customerName,
                 m.IsAproved AS isApproved,
                 m.BasicAmount AS basicAmount,
@@ -418,16 +437,18 @@ exports.getSalesOrderById = async (req) => {
         throw new Error(`Sales order ${orderId} not found.`);
     }
 
-        const itemsQuery = `
+    const itemsQuery = `
         SELECT
             det.Sno AS srNo,
             det.ItemID AS itemId,
             it.ItemName AS productName,
             det.Qty AS quantity,
             det.Rate AS unitPrice,
-            det.NetAmount AS lineTotal
+            det.NetAmount AS lineTotal,
+            u.UnitCode AS unitCode
         FROM tblSODetails det
         LEFT JOIN tblItems it ON it.ItemID = det.ItemID
+        LEFT JOIN tblItemsUnit u ON u.UnitID = det.UnitID
         WHERE det.OrderID = @orderId
         ORDER BY det.Sno ASC
     `;
@@ -436,9 +457,61 @@ exports.getSalesOrderById = async (req) => {
         .input("orderId", sql.NVarChar(50), orderId)
         .query(itemsQuery);
 
+    const termsResult = await pool.request()
+        .input("orderId", sql.NVarChar(50), orderId)
+        .query(`
+            SELECT
+                t.TermID AS termId,
+                tm.TermName AS termName,
+                t.Rate AS termRate,
+                t.Amount AS termAmount,
+                CASE WHEN tm.Sign = '-' THEN '-' ELSE '+' END AS termSign
+            FROM tblSOTerm t
+            LEFT JOIN tblSITermMaster tm ON tm.TermID = t.TermID
+            WHERE t.OrderID = @orderId
+              AND t.TermType = 'B'
+            ORDER BY t.TermID ASC
+        `);
+
+    // Item-wise ('P') terms, matched to lines on Sno.
+    const itemTermsResult = await pool.request()
+        .input("orderId", sql.NVarChar(50), orderId)
+        .query(`
+            SELECT
+                t.Sno AS srNo,
+                t.TermID AS termId,
+                tm.TermName AS termName,
+                t.Rate AS termRate,
+                t.Amount AS termAmount,
+                CASE WHEN tm.Sign = '-' THEN '-' ELSE '+' END AS termSign
+            FROM tblSOTerm t
+            LEFT JOIN tblSITermMaster tm ON tm.TermID = t.TermID
+            WHERE t.OrderID = @orderId
+              AND t.TermType = 'P'
+            ORDER BY t.Sno ASC, t.TermID ASC
+        `);
+
+    const itemTermsBySno = {};
+    for (const row of itemTermsResult.recordset) {
+        if (!itemTermsBySno[row.srNo]) itemTermsBySno[row.srNo] = [];
+        itemTermsBySno[row.srNo].push({
+            termId: row.termId,
+            termName: row.termName,
+            termRate: row.termRate,
+            termAmount: row.termAmount,
+            termSign: row.termSign
+        });
+    }
+
+    const lineItems = itemsResult.recordset.map(li => ({
+        ...li,
+        itemTerms: itemTermsBySno[li.srNo] || []
+    }));
+
     return {
         success: true,
         order: masterResult.recordset[0],
-        lineItems: itemsResult.recordset
+        lineItems,
+        terms: termsResult.recordset
     };
 };

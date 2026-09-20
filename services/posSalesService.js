@@ -1,13 +1,16 @@
 const { getPool, sql } = require("../db");
+
 const {
     UpdateAccountTransactionfromSalesInvoice,
     UpdateInvTransactionfromSalesInvoice,
     UpdateAccountTransactionfromCashBank,
 } = require("../sql/posSalesScript");
+
 const {
     getNextVoucher,
     incrementVoucherSequence,
 } = require("../utils/voucherSequence");
+
 const {
     resolveBranch,
 } = require("../utils/branchResolver");
@@ -34,39 +37,39 @@ async function resolveCurrency(tx, currencyId) {
 exports.createPosSale = async (req) => {
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) throw new Error("Company not selected.");
+
     const pool = await getPool(companyCode);
     if (!pool) throw new Error("Database unavailable.");
-    
-    // 1. EXTRACT NEW FIELDS FROM REQUEST BODY (Fixed isApproved definition here)
-    const { 
-        isTaxInvoice = false, 
-        classId = null,          
-        customerLedgerId, 
-        customerName, 
-        branchId = null, 
-        currencyId = null, 
-        nepaliDate, 
-        adDate, 
-        remarks = null,          
-        counter = "", 
-        isApproved = "N",        // <-- This fixes your ReferenceError!
-        effectiveDate,           
-        items = [], 
-        payments = [], 
-        billTerms = [] 
+
+    const {
+        isTaxInvoice = false,
+        classId = null,
+        customerLedgerId,
+        customerName,
+        branchId = null,
+        currencyId = null,
+        nepaliDate,
+        adDate,
+        remarks = null,
+        counter = "",
+        isApproved = "N",
+        effectiveDate,
+        items = [],
+        payments = [],
+        billTerms = []
     } = req.body;
 
     if (!items.length) throw new Error("Cart is empty.");
 
     const tx = new sql.Transaction(pool);
     await tx.begin();
+
     try {
         const finalBranchId = await resolveBranch(tx, branchId);
         const ledgerId = await resolveCustomerLedger(tx, customerLedgerId);
         const finalCurrency = await resolveCurrency(tx, currencyId);
         const settings = await getSystemSettings(tx);
 
-        // Fetch Username from JWT token automatically!
         const finalPrintedBy = req.user?.username || "ADMIN";
 
         // ==========================================
@@ -75,14 +78,13 @@ exports.createPosSale = async (req) => {
         let masterBasicAmount = 0;
         let masterTermAmount = 0;
         let netAmount = 0;
-
         let globalDiscountAmt = 0;
         let globalTaxRate = 0;
 
         if (billTerms && billTerms.length > 0) {
             billTerms.forEach(t => {
-                if (t.sign === '-') globalDiscountAmt += (Number(t.amount) || 0); 
-                if (t.sign === '+') globalTaxRate += (Number(t.rate) || 0);       
+                if (t.sign === '-') globalDiscountAmt += (Number(t.amount) || 0);
+                if (t.sign === '+') globalTaxRate += (Number(t.rate) || 0);
             });
         }
 
@@ -90,7 +92,6 @@ exports.createPosSale = async (req) => {
 
         items.forEach(item => {
             let itemGross = (Number(item.qty) || 0) * (Number(item.rate) || 0);
-            
             let itemTaxRate = globalTaxRate;
             let itemDiscountAmt = 0;
 
@@ -107,15 +108,15 @@ exports.createPosSale = async (req) => {
 
             let itemBasic = itemGross;
             if (itemTaxRate > 0) {
-                itemBasic = itemGross / (1 + (itemTaxRate / 100)); 
+                itemBasic = itemGross / (1 + (itemTaxRate / 100));
             }
 
-            let itemTaxAmount = itemGross - itemBasic; 
-            let itemTermAmount = itemTaxAmount - itemDiscountAmt; 
-            let itemPayable = itemBasic + itemTermAmount; 
+            let itemTaxAmount = itemGross - itemBasic;
+            let itemTermAmount = itemTaxAmount - itemDiscountAmt;
+            let itemPayable = itemBasic + itemTermAmount;
 
             item.basicAmount = Math.round(itemBasic * 100) / 100;
-            item.termAmount = Math.round(itemTermAmount * 100) / 100; 
+            item.termAmount = Math.round(itemTermAmount * 100) / 100;
             item.netAmount = Math.round(itemPayable * 100) / 100;
 
             masterBasicAmount += item.basicAmount;
@@ -126,9 +127,9 @@ exports.createPosSale = async (req) => {
         if (billTerms && billTerms.length > 0) {
             billTerms.forEach(t => {
                 if (t.sign === '+') {
-                    t.calculatedAmount = masterBasicAmount * ((Number(t.rate) || 0) / 100); 
+                    t.calculatedAmount = masterBasicAmount * ((Number(t.rate) || 0) / 100);
                 } else if (t.sign === '-') {
-                    t.calculatedAmount = Number(t.amount) || 0; 
+                    t.calculatedAmount = Number(t.amount) || 0;
                 }
             });
         }
@@ -140,22 +141,22 @@ exports.createPosSale = async (req) => {
         // 2. DYNAMIC ROUTING USING `POSSequence` COLUMN
         // ==========================================
         const abbrMaxAmount = Number(settings.AbbrMaxAmount || settings.AbbreviatedMaxAmount || 10000);
-        
+
         const docResult = await new sql.Request(tx).query(`
-            SELECT DocumentName, ISNULL(POSSequence, '') as POSSequence 
-            FROM tblVoucherSequences 
+            SELECT DocumentName, ISNULL(POSSequence, '') as POSSequence
+            FROM tblVoucherSequences
             WHERE Module = 'CS'
         `);
-        
+
         const docs = docResult.recordset;
         if (docs.length === 0) throw new Error("No sequence configuration found for Counter Sales (CS) in tblVoucherSequences.");
 
         const abbrDoc = docs.find(d => d.POSSequence.toLowerCase() === 'abbr') || docs[0];
         const taxDoc = docs.find(d => d.POSSequence.toLowerCase() === 'tax') || (docs.length > 1 ? docs[1] : docs[0]);
 
-        let targetDocumentName = abbrDoc.DocumentName; 
+        let targetDocumentName = abbrDoc.DocumentName;
         if (isTaxInvoice || netAmount >= abbrMaxAmount) {
-            targetDocumentName = taxDoc.DocumentName; 
+            targetDocumentName = taxDoc.DocumentName;
         }
 
         const saleSequence = await getNextVoucher(tx, "CS", finalBranchId, targetDocumentName);
@@ -175,6 +176,7 @@ exports.createPosSale = async (req) => {
             } else {
                 voucherId = `${voucherId}-1`;
             }
+
             duplicateCheck = await new sql.Request(tx)
                 .input("vid", sql.NVarChar(50), voucherId)
                 .query("SELECT COUNT(1) as cnt FROM tblSIMaster WHERE VoucherID = @vid");
@@ -182,7 +184,7 @@ exports.createPosSale = async (req) => {
 
         const voucherDate = adDate ? new Date(adDate) : new Date();
         const finalRemarks = (remarks === null || remarks.trim() === "") ? null : remarks.trim();
-        const finalEffectiveDate = effectiveDate ? effectiveDate : voucherDateStr;
+        const finalEffectiveDate = effectiveDate ? effectiveDate : adDate;
 
         // ==========================================
         // 3. Insert Master (tblSIMaster)
@@ -203,8 +205,8 @@ exports.createPosSale = async (req) => {
             .input("remarks", sql.NVarChar(500), finalRemarks)
             .input("userId", sql.Int, req.user?.userId || 1)
             .input("classId", sql.Int, classId)
-            .input("printedBy", sql.NVarChar(50), finalPrintedBy)      // Dynamic Username from Token
-            .input("isaproved", sql.Char(1), isApproved)               // Correctly spelled for your DB
+            .input("printedBy", sql.NVarChar(50), finalPrintedBy)
+            .input("isaproved", sql.Char(1), isApproved)
             .input("effectiveDate", sql.DateTime, finalEffectiveDate ? new Date(finalEffectiveDate) : voucherDate)
             .query(`
                 INSERT INTO tblSIMaster (
@@ -225,7 +227,7 @@ exports.createPosSale = async (req) => {
         for (const item of items) {
             item.sno = sno;
             const validItemId = item.itemId || item.id;
-            
+
             await new sql.Request(tx)
                 .input("voucherId", sql.NVarChar(50), voucherId)
                 .input("sno", sql.Int, sno)
@@ -246,19 +248,21 @@ exports.createPosSale = async (req) => {
                         0, @qty, @rate, @basicAmount, @termAmount, @netAmount
                     )
                 `);
+
             sno++;
         }
 
         // 5. Insert Bill Terms (tblSITerm)
         if (billTerms && billTerms.length > 0) {
             for (const t of billTerms) {
-                const termAmt = t.calculatedAmount || 0; 
+                const termAmt = t.calculatedAmount || 0;
                 if (termAmt === 0) continue;
+
                 await new sql.Request(tx)
                     .input("voucherId", sql.NVarChar(100), voucherId)
                     .input("termId", sql.Int, t.termId)
                     .input("sno", sql.Int, 0)
-                    .input("itemId", sql.Int, null) 
+                    .input("itemId", sql.Int, null)
                     .input("termType", sql.Char(2), 'B')
                     .input("taxationType", sql.NVarChar(100), null)
                     .input("rate", sql.Decimal(18, 4), t.rate || 0)
@@ -273,16 +277,15 @@ exports.createPosSale = async (req) => {
         // 6. Trigger Inventory & Accounting Updates
         await new sql.Request(tx).input("VoucherNo", sql.NVarChar(50), voucherId).query(UpdateAccountTransactionfromSalesInvoice);
         await new sql.Request(tx).input("VoucherNo", sql.NVarChar(50), voucherId).query(UpdateInvTransactionfromSalesInvoice);
-        
         await incrementVoucherSequence(tx, saleSequence.documentId, saleSequence.documentName);
 
         // 7. Handle POS Cash Payment
         if (netAmount > 0 && payments.length > 0) {
             for (const payment of payments) {
                 if (Number(payment.amount) <= 0) continue;
-                
-                const cbVoucher = await getNextVoucher(tx, "CB", finalBranchId); 
-                
+
+                const cbVoucher = await getNextVoucher(tx, "CB", finalBranchId);
+
                 await new sql.Request(tx)
                     .input("cashBankId", sql.NVarChar(50), cbVoucher.voucherId)
                     .input("voucherDate", sql.DateTime, voucherDate)
@@ -318,7 +321,7 @@ exports.createPosSale = async (req) => {
                     `);
 
                 await new sql.Request(tx).input("VoucherNo", sql.NVarChar(50), cbVoucher.voucherId).query(UpdateAccountTransactionfromCashBank);
-                
+
                 await new sql.Request(tx)
                     .input("cashBankId", sql.NVarChar(50), cbVoucher.voucherId)
                     .input("voucherId", sql.NVarChar(50), voucherId)
@@ -336,7 +339,7 @@ exports.createPosSale = async (req) => {
         }
 
         await tx.commit();
-        return { success: true, voucherId, basicAmount: masterBasicAmount, termAmount: masterTermAmount, netAmount, tenderAmount, returnAmount,cashier: finalPrintedBy };
+        return { success: true, voucherId, basicAmount: masterBasicAmount, termAmount: masterTermAmount, netAmount, tenderAmount, returnAmount, cashier: finalPrintedBy };
     } catch (err) {
         console.error("POS Sales Service Error:", err.message);
         if (tx) { try { await tx.rollback(); } catch (_) {} }
@@ -344,10 +347,11 @@ exports.createPosSale = async (req) => {
     }
 };
 
-exports.getNextPosInvoiceNumber = async (req) => { 
+exports.getNextPosInvoiceNumber = async (req) => {
     const pool = await getPool(req.headers["x-company-code"]);
     const tx = new sql.Transaction(pool);
     await tx.begin();
+
     try {
         const voucher = await getNextVoucher(tx, 'CS', null);
         await tx.commit();

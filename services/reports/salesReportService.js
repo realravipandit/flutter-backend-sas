@@ -36,6 +36,7 @@ function toLocalDateTimeString(date) {
 // List + Filtering + Sorting + Pagination
 // =========================================
 const getSalesList = async (req) => {
+
     // --- Validate Company ---
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) {
@@ -63,7 +64,7 @@ const getSalesList = async (req) => {
     const pagination = buildPagination(page, limit, request, sql);
 
     // --- Main Sales Query (Using exact View_DynamicSITerms column mapping) ---
-    // 👉 FIX: VoucherDate and VoucherTime are both CONVERTed to plain
+    // FIX: VoucherDate and VoucherTime are both CONVERTed to plain
     // strings in SQL, so no native DATETIME ever becomes a JS Date
     // object here --- that's what was getting UTC-serialized and
     // shown a day/hours off once it reached the client.
@@ -113,6 +114,7 @@ const getSalesList = async (req) => {
     // --- Count Query ---
     const countRequest = pool.request();
     const countWhereClause = buildSalesFilters(req.query, countRequest, sql);
+
     const countQuery = `
         SELECT COUNT(*) AS total
         FROM tblSIMaster m
@@ -128,6 +130,7 @@ const getSalesList = async (req) => {
 
     // --- Format Records ---
     const records = result.recordset.map(row => {
+
         let parsedItems = [];
         let parsedTerms = [];
 
@@ -180,8 +183,20 @@ const getSalesList = async (req) => {
 // =========================================
 // GET SALES DETAILS
 // Single Voucher
+//
+// Returns:
+//   master    - tblSIMaster row (+ customer address, counter name, resolved type)
+//   items     - tblSIDetails rows (+ product/unit names). Each row also carries
+//               `itemTerms`: its item-wise ('P') terms from tblSITerm, matched on Sno.
+//   terms     - UNCHANGED: the View_DynamicSITerms rows the existing PDFs use.
+//   billTerms - bill-level ('B') terms from tblSITerm. The 'BT' rows are just the
+//               bill terms apportioned across items, so they are not returned
+//               (would double count).
+// tblSITerm.Amount is stored as an absolute value, so the sign ('+' / '-')
+// comes from tblSITermMaster.Sign.
 // =========================================
 const getSalesDetails = async (req) => {
+
     // --- Validate Company ---
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) {
@@ -208,6 +223,7 @@ const getSalesDetails = async (req) => {
             SELECT
                 m.*,
                 l.LedgerAddress AS customerAddress,
+                l.LedgerName AS customerLedgerName,
                 c.ClassName AS counterName
             FROM tblSIMaster m
             LEFT JOIN tblLedger l ON m.LedgerID = l.LedgerID
@@ -233,6 +249,7 @@ const getSalesDetails = async (req) => {
             LEFT JOIN tblItems i ON d.ItemID = i.ItemID
             LEFT JOIN tblItemsUnit u ON d.UnitID = u.UnitID
             WHERE d.VoucherID = @VoucherID
+            ORDER BY d.Sno ASC
         `);
 
     // --- Dynamic Terms via View ---
@@ -248,6 +265,50 @@ const getSalesDetails = async (req) => {
             FROM View_DynamicSITerms
             WHERE [Voucher No] = @VoucherID
         `);
+
+    // --- Bill-level ('B') and item-wise ('P') terms straight from tblSITerm ---
+    const invoiceTermsRes = await pool
+        .request()
+        .input("VoucherID", sql.VarChar(50), voucherId)
+        .query(`
+            SELECT
+                t.TermType AS termType,
+                t.Sno AS termSno,
+                t.TermID AS termId,
+                tm.TermName AS termName,
+                t.Rate AS termRate,
+                t.Amount AS termAmount,
+                CASE WHEN tm.Sign = '-' THEN '-' ELSE '+' END AS termSign
+            FROM tblSITerm t
+            LEFT JOIN tblSITermMaster tm ON tm.TermID = t.TermID
+            WHERE t.VoucherID = @VoucherID
+              AND t.TermType IN ('B', 'P')
+            ORDER BY t.Sno ASC, t.TermID ASC
+        `);
+
+    const billTerms = [];
+    const itemTermsBySno = {};
+
+    for (const row of invoiceTermsRes.recordset) {
+        const term = {
+            termId: row.termId,
+            termName: row.termName,
+            termRate: row.termRate,
+            termAmount: row.termAmount,
+            termSign: row.termSign
+        };
+        if (row.termType === 'B') {
+            billTerms.push(term);
+        } else {
+            if (!itemTermsBySno[row.termSno]) itemTermsBySno[row.termSno] = [];
+            itemTermsBySno[row.termSno].push(term);
+        }
+    }
+
+    const items = detailsRes.recordset.map(row => ({
+        ...row,
+        itemTerms: itemTermsBySno[row.Sno] || []
+    }));
 
     // --- Resolve Invoice Type (SB / Tax / Abbr) from voucher prefix ---
     const seqRes = await pool.request().query(`
@@ -269,7 +330,7 @@ const getSalesDetails = async (req) => {
         }
     }
 
-    // 👉 FIX: reformat VoucherDate and VoucherTime using local getters
+    // FIX: reformat VoucherDate and VoucherTime using local getters
     // before returning, so this single-voucher view doesn't have the
     // same UTC-shift issue as the list view. VoucherTime keeps its
     // full hh:mm:ss since it's a genuine creation-timestamp column
@@ -280,8 +341,9 @@ const getSalesDetails = async (req) => {
 
     return {
         master,
-        items: detailsRes.recordset,
-        terms: termsRes.recordset
+        items,
+        terms: termsRes.recordset,
+        billTerms
     };
 };
 
@@ -289,6 +351,7 @@ const getSalesDetails = async (req) => {
 // GET SALES SUMMARY (Top Widgets)
 // =========================================
 const getSalesSummary = async (req) => {
+
     // --- Validate Company ---
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) {
