@@ -84,7 +84,8 @@ const getSalesList = async (req) => {
                     d.Qty,
                     d.Rate,
                     d.NetAmount AS amount,
-                    u.UnitName AS unit
+                    u.UnitName AS unitName,
+                    u.UnitCode AS unitCode
                 FROM tblSIDetails d
                 LEFT JOIN tblItems i ON d.ItemID = i.ItemID
                 LEFT JOIN tblItemsUnit u ON d.UnitID = u.UnitID
@@ -103,8 +104,8 @@ const getSalesList = async (req) => {
             ) AS termsJson
         FROM tblSIMaster m
         LEFT JOIN tblLedger l ON m.LedgerID = l.LedgerID
- ${whereClause}
-ORDER BY ${orderBy}
+        ${whereClause}
+        ORDER BY ${orderBy}
         OFFSET @offset ROWS
         FETCH NEXT @limit ROWS ONLY;
     `;
@@ -116,7 +117,7 @@ ORDER BY ${orderBy}
         SELECT COUNT(*) AS total
         FROM tblSIMaster m
         LEFT JOIN tblLedger l ON m.LedgerID = l.LedgerID
- ${countWhereClause};
+        ${countWhereClause};
     `;
 
     // --- Execute Queries Concurrently ---
@@ -149,6 +150,7 @@ ORDER BY ${orderBy}
         }
 
         const { itemsJson, termsJson, ...masterData } = row;
+
         return {
             ...masterData,
             items: parsedItems,
@@ -217,7 +219,7 @@ const getSalesDetails = async (req) => {
         throw new Error(`Sale record ${voucherId} not found.`);
     }
 
-    // --- Detail Items (+ unit name) ---
+    // --- Detail Items (+ unit name and code, so the UI can choose which to show) ---
     const detailsRes = await pool
         .request()
         .input("VoucherID", sql.VarChar(50), voucherId)
@@ -225,7 +227,8 @@ const getSalesDetails = async (req) => {
             SELECT
                 d.*,
                 i.ItemName AS productName,
-                u.UnitName AS unit
+                u.UnitName AS unitName,
+                u.UnitCode AS unitCode
             FROM tblSIDetails d
             LEFT JOIN tblItems i ON d.ItemID = i.ItemID
             LEFT JOIN tblItemsUnit u ON d.UnitID = u.UnitID
@@ -311,7 +314,7 @@ const getSalesSummary = async (req) => {
         FROM tblSIDetails d
         LEFT JOIN tblSIMaster m ON m.VoucherID = d.VoucherID
         LEFT JOIN tblLedger l ON m.LedgerID = l.LedgerID
- ${whereClause}
+        ${whereClause}
     `);
 
     return result.recordset[0] || { salesQty: 0, salesAmount: 0, quantity: 0, totalAmount: 0 };
