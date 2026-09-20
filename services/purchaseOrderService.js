@@ -19,11 +19,12 @@ async function getSystemSettings(tx) {
     return result.recordset[0];
 }
 
-async function resolveCustomerLedger(tx, customerLedgerId) {
-    if (customerLedgerId != null) return customerLedgerId;
-    const settings = await getSystemSettings(tx);
-    if (!settings.Cash_Book) throw new Error("Cash Book ledger is not configured.");
-    return settings.Cash_Book;
+// No "walk-in vendor" concept --- a Purchase Order always needs a real
+// vendor ledger. (Sales Order falls back to Cash_Book when no customer
+// is picked; there is no equivalent fallback here.)
+async function resolveVendorLedger(vendorLedgerId) {
+    if (vendorLedgerId == null) throw new Error("Vendor is required.");
+    return vendorLedgerId;
 }
 
 async function resolveCurrency(tx, currencyId) {
@@ -64,21 +65,22 @@ async function validateItemsGodownsUnits(tx, items) {
     }
 }
 
-// Shared customer-name resolution: PartyName unless it's blank/"cash",
-// in which case fall back to tblLedger.LedgerName via LedgerID.
-const CUSTOMER_NAME_EXPR = `
+// Shared vendor-name resolution: PartyName unless blank, in which case
+// fall back to tblLedger.LedgerName via LedgerID. (No "cash" special
+// case here --- that's a sales-only concept.)
+const VENDOR_NAME_EXPR = `
     CASE
-        WHEN m.PartyName IS NULL OR LTRIM(RTRIM(m.PartyName)) = '' OR LOWER(LTRIM(RTRIM(m.PartyName))) = 'cash'
+        WHEN m.PartyName IS NULL OR LTRIM(RTRIM(m.PartyName)) = ''
             THEN l.LedgerName
         ELSE m.PartyName
     END
 `;
 
 // ─────────────────────────────────────────────────────────────
-// CREATE SALES ORDER
+// CREATE PURCHASE ORDER
 // ─────────────────────────────────────────────────────────────
 
-exports.createSalesOrder = async (req) => {
+exports.createPurchaseOrder = async (req) => {
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) throw new Error("Company not selected.");
 
@@ -86,7 +88,7 @@ exports.createSalesOrder = async (req) => {
     if (!pool) throw new Error("Database unavailable.");
 
     const {
-        customerLedgerId, customerName, branchId = null, agentId = null, classId = null, classId1 = null,
+        vendorLedgerId, vendorName, branchId = null, agentId = null, classId = null, classId1 = null,
         classId2 = null, currencyId = null, nepaliDate, adDate, remarks = "",
         items = [], billTerms = []
     } = req.body;
@@ -98,14 +100,14 @@ exports.createSalesOrder = async (req) => {
 
     try {
         const finalBranchId = await resolveBranch(tx, branchId);
-        const ledgerId = await resolveCustomerLedger(tx, customerLedgerId);
+        const ledgerId = await resolveVendorLedger(vendorLedgerId);
         const finalCurrency = await resolveCurrency(tx, currencyId);
 
         await validateItemsGodownsUnits(tx, items);
 
-        // Sequence uses 'SO' for Sales Order
-        const soSequence = await getNextVoucher(tx, "SO", finalBranchId);
-        const orderId = soSequence.voucherId;
+        // Sequence uses 'PO' for Purchase Order
+        const poSequence = await getNextVoucher(tx, "PO", finalBranchId);
+        const orderId = poSequence.voucherId;
 
         const orderDate = adDate ? new Date(adDate) : new Date();
         const orderTime = new Date();
@@ -139,14 +141,16 @@ exports.createSalesOrder = async (req) => {
 
         const netAmount = Math.round((masterBasicAmount + billTermAmount) * 100) / 100;
 
-        // 1. Insert Master into tblSOMaster
+        // 1. Insert Master into tblPOMaster
+        // Note: column is TermsAmount (plural) here, unlike tblSOMaster's TermAmount.
+        // tblPOMaster has no OrderType column, unlike tblSOMaster.
         await new sql.Request(tx)
-            .input("orderId", sql.NVarChar(50), orderId)
+            .input("orderId", sql.NVarChar(100), orderId)
             .input("orderDate", sql.DateTime, orderDate)
             .input("orderTime", sql.DateTime, orderTime)
-            .input("orderMiti", sql.NVarChar(20), nepaliDate || null)
+            .input("orderMiti", sql.NVarChar(30), nepaliDate || null)
             .input("ledgerId", sql.Int, ledgerId)
-            .input("partyName", sql.NVarChar(100), customerName || null)
+            .input("partyName", sql.NVarChar(1000), vendorName || null)
             .input("agentId", sql.Int, agentId)
             .input("classId", sql.Int, classId)
             .input("classId1", sql.Int, classId1)
@@ -154,34 +158,31 @@ exports.createSalesOrder = async (req) => {
             .input("branchId", sql.Int, finalBranchId)
             .input("currencyId", sql.Int, finalCurrency)
             .input("basicAmount", sql.Decimal(18, 4), masterBasicAmount)
-            .input("termAmount", sql.Decimal(18, 4), billTermAmount)
+            .input("termsAmount", sql.Decimal(18, 4), billTermAmount)
             .input("netAmount", sql.Decimal(18, 4), netAmount)
-            .input("tenderAmount", sql.Decimal(18, 4), 0)
-            .input("returnAmount", sql.Decimal(18, 4), 0)
-            .input("remarks", sql.NVarChar(500), remarks || "")
+            .input("remarks", sql.NVarChar(2048), remarks || "")
             .input("userId", sql.Int, req.user?.userId || 1)
             .query(`
-                INSERT INTO tblSOMaster (
-                    OrderID, OrderDate, OrderTime, OrderMiti, OrderType,
+                INSERT INTO tblPOMaster (
+                    OrderID, OrderDate, OrderTime, OrderMiti,
                     LedgerID, PartyName, AgentID, ClassID, ClassID1, ClassID2, BranchID, CurrencyID, CurrencyRate,
-                    BasicAmount, TermAmount, NetAmount, TenderAmount, ReturnAmount, Remarks, UserID, IsAproved
+                    BasicAmount, TermsAmount, NetAmount, Remarks, UserID, IsAproved
                 ) VALUES (
-                    @orderId, @orderDate, @orderTime, @orderMiti, 'N',
+                    @orderId, @orderDate, @orderTime, @orderMiti,
                     @ledgerId, @partyName, @agentId, @classId, @classId1, @classId2, @branchId, @currencyId, 1,
-                    @basicAmount, @termAmount, @netAmount, @tenderAmount, @returnAmount, @remarks, @userId, 'N'
+                    @basicAmount, @termsAmount, @netAmount, @remarks, @userId, 'N'
                 )
             `);
 
-        // 2. Insert Items into tblSODetails & Item-Wise Terms into tblSOTerm
+        // 2. Insert Items into tblPODetails & Item-Wise Terms into tblPOTerm
         let sno = 1;
         for (const item of items) {
             item.sno = sno;
 
             await new sql.Request(tx)
-                .input("orderId", sql.NVarChar(50), orderId)
+                .input("orderId", sql.NVarChar(100), orderId)
                 .input("sno", sql.Int, sno)
                 .input("itemId", sql.Int, item.itemId)
-                .input("godownId", sql.Int, item.godownId ?? null)
                 .input("altQty", sql.Decimal(18, 4), item.altQty || 0)
                 .input("altUnitId", sql.Int, item.altUnitId || null)
                 .input("qty", sql.Decimal(18, 4), item.qty)
@@ -193,12 +194,12 @@ exports.createSalesOrder = async (req) => {
                 .input("termAmount", sql.Decimal(18, 4), Math.abs(item.termAmount))
                 .input("netAmount", sql.Decimal(18, 4), item.netAmount)
                 .query(`
-                    INSERT INTO tblSODetails (
-                        OrderID, Sno, ItemID, GodownID, AltQty, AltUnitID, Qty, UnitID,
+                    INSERT INTO tblPODetails (
+                        OrderID, Sno, ItemID, AltQty, AltUnitID, Qty, UnitID,
                         AltStockQty, StockQty, Rate, BasicAmount, TermAmount, NetAmount,
                         OrderIssueQty, OrderAltIssueQty, OrderBalanceQty, FreeQty, StockFreeQty
                     ) VALUES (
-                        @orderId, @sno, @itemId, @godownId, @altQty, @altUnitId, @qty, @unitId,
+                        @orderId, @sno, @itemId, @altQty, @altUnitId, @qty, @unitId,
                         @altStockQty, @stockQty, @rate, @basicAmount, @termAmount, @netAmount,
                         0, 0, @qty, 0, 0
                     )
@@ -207,15 +208,15 @@ exports.createSalesOrder = async (req) => {
             if (item.itemTerms && item.itemTerms.length > 0) {
                 for (const t of item.itemTerms) {
                     await new sql.Request(tx)
-                        .input("orderId", sql.NVarChar(50), orderId)
+                        .input("orderId", sql.NVarChar(100), orderId)
                         .input("termId", sql.Int, t.termId)
                         .input("sno", sql.Int, sno)
                         .input("itemId", sql.Int, item.itemId)
-                        .input("termType", sql.VarChar(5), 'P')
+                        .input("termType", sql.Char(2), 'P')
                         .input("rate", sql.Decimal(18, 4), t.percent || t.rate || 0)
                         .input("amount", sql.Decimal(18, 4), Math.abs(t.amount))
                         .query(`
-                            INSERT INTO tblSOTerm (OrderID, TermID, Sno, ItemID, TermType, Rate, Amount)
+                            INSERT INTO tblPOTerm (OrderID, TermID, Sno, ItemID, TermType, Rate, Amount)
                             VALUES (@orderId, @termId, @sno, @itemId, @termType, @rate, @amount)
                         `);
                 }
@@ -223,7 +224,7 @@ exports.createSalesOrder = async (req) => {
             sno++;
         }
 
-        // 3. Insert Bill-Level Terms & Apportionment ('B' & 'BT') into tblSOTerm
+        // 3. Insert Bill-Level Terms & Apportionment ('B' & 'BT') into tblPOTerm
         let totalItemsNetAmount = masterBasicAmount;
         let baseForApportion = totalItemsNetAmount > 0 ? totalItemsNetAmount : basicAmount;
 
@@ -231,14 +232,14 @@ exports.createSalesOrder = async (req) => {
             const bAmount = Number(term.amount) || 0;
 
             await new sql.Request(tx)
-                .input("orderId", sql.NVarChar(50), orderId)
+                .input("orderId", sql.NVarChar(100), orderId)
                 .input("termId", sql.Int, term.termId)
                 .input("sno", sql.Int, 0)
-                .input("termType", sql.VarChar(5), 'B')
+                .input("termType", sql.Char(2), 'B')
                 .input("rate", sql.Decimal(18, 4), term.percent || term.rate || 0)
                 .input("amount", sql.Decimal(18, 4), Math.abs(bAmount))
                 .query(`
-                    INSERT INTO tblSOTerm (OrderID, TermID, Sno, TermType, Rate, Amount)
+                    INSERT INTO tblPOTerm (OrderID, TermID, Sno, TermType, Rate, Amount)
                     VALUES (@orderId, @termId, @sno, @termType, @rate, @amount)
                 `);
 
@@ -256,15 +257,15 @@ exports.createSalesOrder = async (req) => {
                     distributedSoFar += btAmount;
 
                     await new sql.Request(tx)
-                        .input("orderId", sql.NVarChar(50), orderId)
+                        .input("orderId", sql.NVarChar(100), orderId)
                         .input("termId", sql.Int, term.termId)
                         .input("sno", sql.Int, itm.sno)
                         .input("itemId", sql.Int, itm.itemId)
-                        .input("termType", sql.VarChar(5), 'BT')
+                        .input("termType", sql.Char(2), 'BT')
                         .input("rate", sql.Decimal(18, 4), term.percent || term.rate || 0)
                         .input("amount", sql.Decimal(18, 4), Math.abs(btAmount))
                         .query(`
-                            INSERT INTO tblSOTerm (OrderID, TermID, Sno, ItemID, TermType, Rate, Amount)
+                            INSERT INTO tblPOTerm (OrderID, TermID, Sno, ItemID, TermType, Rate, Amount)
                             VALUES (@orderId, @termId, @sno, @itemId, @termType, @rate, @amount)
                         `);
                 }
@@ -272,7 +273,7 @@ exports.createSalesOrder = async (req) => {
         }
 
         // 4. Advance Main Voucher Sequence & Commit
-        await incrementVoucherSequence(tx, soSequence.documentId, soSequence.documentName);
+        await incrementVoucherSequence(tx, poSequence.documentId, poSequence.documentName);
         await tx.commit();
 
         return {
@@ -284,7 +285,7 @@ exports.createSalesOrder = async (req) => {
         };
 
     } catch (err) {
-        console.error("Sales Order Service Error:", err.message);
+        console.error("Purchase Order Service Error:", err.message);
         if (tx && !tx._aborted) {
             try { await tx.rollback(); } catch (rollbackErr) { }
         }
@@ -293,15 +294,15 @@ exports.createSalesOrder = async (req) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// GET NEXT SALES ORDER NUMBER
+// GET NEXT PURCHASE ORDER NUMBER
 // ─────────────────────────────────────────────────────────────
 
-exports.getNextSalesOrderNumber = async (req) => {
+exports.getNextPurchaseOrderNumber = async (req) => {
     const pool = await getPool(req.headers["x-company-code"]);
     const tx = new sql.Transaction(pool);
     await tx.begin();
     try {
-        const voucher = await getNextVoucher(tx, 'SO', null);
+        const voucher = await getNextVoucher(tx, 'PO', null);
         await tx.commit();
         return { success: true, voucherId: voucher.voucherId };
     } catch (err) {
@@ -311,34 +312,55 @@ exports.getNextSalesOrderNumber = async (req) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// GET TERM MASTERS (Reused for Orders)
+// GET TERM MASTERS (from tblPITermMaster, the purchase-side term master)
 // ─────────────────────────────────────────────────────────────
 
-exports.getTermMasters = async (req) => {
+exports.getPiTermMasters = async (req) => {
     const companyCode = req.headers['x-company-code'];
     if (!companyCode) throw new Error("Company code required");
 
     const pool = await getPool(companyCode);
     const result = await pool.request().query(`
         SELECT TermID, TermName, Rate, Sign, LedgerID, ISNULL(ItemWise, 'N') AS ItemWise
-        FROM tblSITermMaster
+        FROM tblPITermMaster
         ORDER BY TermID ASC
     `);
     return result.recordset;
 };
 
 // ─────────────────────────────────────────────────────────────
-// GET SALES ORDERS (LIST)
+// GET VENDORS
 //
-// Powers the list screen. Customer name resolves via PartyName, falling
-// back to tblLedger.LedgerName when PartyName is blank/"Cash" (per the
-// same convention createSalesOrder uses when no customerName is given).
-// Status is IsAproved (Y/N) --- there's no separate status column.
-// Optional query params: page, pageSize (default 1 / 50), search (matches
-// OrderID or resolved customer name).
+// tblLedger filtered by LedgerType = 'VE'. Mirrors fetchLedgers() on the
+// sales side, but scoped to vendors only.
 // ─────────────────────────────────────────────────────────────
 
-exports.getSalesOrders = async (req) => {
+exports.getVendors = async (req) => {
+    const companyCode = req.headers['x-company-code'];
+    if (!companyCode) throw new Error("Company code required");
+
+    const pool = await getPool(companyCode);
+    const result = await pool.request().query(`
+        SELECT LedgerID, LedgerName, LedgerCode
+        FROM tblLedger
+        WHERE LedgerType = 'VE'
+        ORDER BY LedgerName ASC
+    `);
+    return result.recordset;
+};
+
+// ─────────────────────────────────────────────────────────────
+// GET PURCHASE ORDERS (LIST)
+//
+// Vendor name resolves via PartyName, falling back to
+// tblLedger.LedgerName when PartyName is blank.
+// Status is IsAproved (Y/N).
+// OrderDate is returned as a yyyy-MM-dd string (CONVERT ... 23) to avoid
+// the UTC date-shift problem.
+// Optional query params: page, pageSize (default 1 / 50), search.
+// ─────────────────────────────────────────────────────────────
+
+exports.getPurchaseOrders = async (req) => {
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) throw new Error("Company not selected.");
 
@@ -357,23 +379,24 @@ exports.getSalesOrders = async (req) => {
     let searchClause = "";
     if (search) {
         request.input("search", sql.NVarChar(100), `%${search}%`);
-        searchClause = `AND (m.OrderID LIKE @search OR ${CUSTOMER_NAME_EXPR} LIKE @search)`;
+        searchClause = `AND (m.OrderID LIKE @search OR ${VENDOR_NAME_EXPR} LIKE @search)`;
     }
 
     const result = await request.query(`
         SELECT
-            m.OrderID           AS orderNumber,
-            m.OrderDate         AS orderDate,
-            ${CUSTOMER_NAME_EXPR} AS customerName,
-            m.IsAproved          AS isApproved,
-            m.NetAmount          AS total,
-            ISNULL(d.itemCount, 0) AS itemCount,
-            ISNULL(d.totalQty, 0)  AS totalQty
-        FROM tblSOMaster m
+            m.OrderID                              AS orderNumber,
+            CONVERT(varchar(10), m.OrderDate, 23)  AS orderDate,
+            m.OrderMiti                            AS miti,
+            ${VENDOR_NAME_EXPR}                    AS vendorName,
+            m.IsAproved                            AS isApproved,
+            m.NetAmount                            AS total,
+            ISNULL(d.itemCount, 0)                 AS itemCount,
+            ISNULL(d.totalQty, 0)                  AS totalQty
+        FROM tblPOMaster m
         LEFT JOIN tblLedger l ON l.LedgerID = m.LedgerID
         OUTER APPLY (
             SELECT COUNT(*) AS itemCount, SUM(det.Qty) AS totalQty
-            FROM tblSODetails det
+            FROM tblPODetails det
             WHERE det.OrderID = m.OrderID
         ) d
         WHERE 1 = 1
@@ -386,135 +409,118 @@ exports.getSalesOrders = async (req) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// GET SALES ORDER BY ID (DETAIL)
+// GET PURCHASE ORDER BY ID (DETAIL)
 //
-// Powers the detail screen --- master row + line items + bill terms.
-// Line items are joined to tblItems for the product name (tblSODetails
-// only stores ItemID) and tblItemsUnit for the unit code.
+// Response shape matches PurchaseOrderDetail.fromJson (Dart):
+//   { success, order: {...}, lineItems: [...], terms: [...] }
 //
-// The master row also returns customerAddress and customerPan
-// (tblLedger.LedgerAddress / tblLedger.PanNo). NULL becomes ''; the app
-// hides blank lines.
-//
-// Bill terms come from tblSOTerm rows with TermType = 'B' (the
-// bill-level rows written by createSalesOrder). The 'P' (item-wise) and
-// 'BT' (per-item apportionment) rows are NOT returned here --- item-wise
-// terms are returned separately, attached to their line as `itemTerms`
-// (matched on Sno), and 'BT' rows are just the bill terms split across
-// items, so including them would double count. tblSOTerm.Amount is stored
-// as an absolute value, so the sign ('+' / '-') is taken from
-// tblSITermMaster.Sign.
+// * order keys include vendorAddress and vendorPan (tblLedger.LedgerAddress /
+//   tblLedger.PanNo). NULL becomes '' here; the app hides blank lines.
+// * lineItems keys: srNo, itemId, productName, quantity, unitPrice,
+//   lineTotal, unitCode, itemTerms[]
+// * term keys: termId, termName, termSign, termRate, termAmount
+// * `terms` = bill-level terms (TermType 'B'). 'P' rows are attached to
+//   their line as itemTerms (matched on Sno). 'BT' rows are NOT returned
+//   (they're the bill terms split across items; would double count).
+// * tblPOTerm.Amount is absolute; the sign comes from tblPITermMaster.Sign.
+// * TermType is char(2), so it comes back space-padded ('B '). It is
+//   RTRIMmed in SQL and trimmed again in JS before comparing.
 // ─────────────────────────────────────────────────────────────
 
-exports.getSalesOrderById = async (req) => {
+exports.getPurchaseOrderById = async (req) => {
     const companyCode = req.headers["x-company-code"];
     if (!companyCode) throw new Error("Company not selected.");
-
-    const orderId = req.params.orderId;
-    if (!orderId) throw new Error("Order ID is required.");
 
     const pool = await getPool(companyCode);
     if (!pool) throw new Error("Database unavailable.");
 
+    const orderId = (req.params.orderId || "").trim();
+    if (!orderId) throw new Error("Order ID is required.");
+
+    // 1. Master
     const masterResult = await pool.request()
-        .input("orderId", sql.NVarChar(50), orderId)
+        .input("orderId", sql.NVarChar(100), orderId)
         .query(`
             SELECT
-                m.OrderID AS orderNumber,
-                m.OrderDate AS orderDate,
-                m.OrderMiti AS miti,
-                ${CUSTOMER_NAME_EXPR} AS customerName,
-                LTRIM(RTRIM(ISNULL(l.LedgerAddress, ''))) AS customerAddress,
-                LTRIM(RTRIM(ISNULL(l.PanNo, '')))         AS customerPan,
-                m.IsAproved AS isApproved,
-                m.BasicAmount AS basicAmount,
-                m.TermAmount AS termAmount,
-                m.NetAmount AS total,
-                m.Remarks AS remarks
-            FROM tblSOMaster m
+                m.OrderID                              AS orderNumber,
+                CONVERT(varchar(10), m.OrderDate, 23)  AS orderDate,
+                m.OrderMiti                            AS miti,
+                ${VENDOR_NAME_EXPR}                    AS vendorName,
+                LTRIM(RTRIM(ISNULL(l.LedgerAddress, ''))) AS vendorAddress,
+                LTRIM(RTRIM(ISNULL(l.PanNo, '')))         AS vendorPan,
+                m.IsAproved                            AS isApproved,
+                m.BasicAmount                          AS basicAmount,
+                m.TermsAmount                          AS termAmount,
+                m.NetAmount                            AS total,
+                m.Remarks                              AS remarks
+            FROM tblPOMaster m
             LEFT JOIN tblLedger l ON l.LedgerID = m.LedgerID
             WHERE m.OrderID = @orderId
         `);
 
-    if (!masterResult.recordset.length) {
-        throw new Error(`Sales order ${orderId} not found.`);
-    }
+    if (!masterResult.recordset.length) throw new Error("Purchase order not found.");
+    const master = masterResult.recordset[0];
 
-    const itemsQuery = `
-        SELECT
-            det.Sno AS srNo,
-            det.ItemID AS itemId,
-            it.ItemName AS productName,
-            det.Qty AS quantity,
-            det.Rate AS unitPrice,
-            det.NetAmount AS lineTotal,
-            u.UnitCode AS unitCode
-        FROM tblSODetails det
-        LEFT JOIN tblItems it ON it.ItemID = det.ItemID
-        LEFT JOIN tblItemsUnit u ON u.UnitID = det.UnitID
-        WHERE det.OrderID = @orderId
-        ORDER BY det.Sno ASC
-    `;
-
+    // 2. Line items
     const itemsResult = await pool.request()
-        .input("orderId", sql.NVarChar(50), orderId)
-        .query(itemsQuery);
-
-    const termsResult = await pool.request()
-        .input("orderId", sql.NVarChar(50), orderId)
+        .input("orderId", sql.NVarChar(100), orderId)
         .query(`
             SELECT
-                t.TermID AS termId,
-                tm.TermName AS termName,
-                t.Rate AS termRate,
-                t.Amount AS termAmount,
-                CASE WHEN tm.Sign = '-' THEN '-' ELSE '+' END AS termSign
-            FROM tblSOTerm t
-            LEFT JOIN tblSITermMaster tm ON tm.TermID = t.TermID
-            WHERE t.OrderID = @orderId
-              AND t.TermType = 'B'
-            ORDER BY t.TermID ASC
+                det.Sno         AS srNo,
+                det.ItemID      AS itemId,
+                i.ItemName      AS productName,
+                det.Qty         AS quantity,
+                det.Rate        AS unitPrice,
+                det.NetAmount   AS lineTotal,
+                u.UnitCode      AS unitCode
+            FROM tblPODetails det
+            LEFT JOIN tblItems i ON i.ItemID = det.ItemID
+            LEFT JOIN tblItemsUnit u ON u.UnitID = det.UnitID
+            WHERE det.OrderID = @orderId
+            ORDER BY det.Sno ASC
         `);
 
-    // Item-wise ('P') terms, matched to lines on Sno.
-    const itemTermsResult = await pool.request()
-        .input("orderId", sql.NVarChar(50), orderId)
+    // 3. Item-wise ('P') and bill ('B') terms
+    const termsResult = await pool.request()
+        .input("orderId", sql.NVarChar(100), orderId)
         .query(`
             SELECT
-                t.Sno AS srNo,
-                t.TermID AS termId,
-                tm.TermName AS termName,
-                t.Rate AS termRate,
-                t.Amount AS termAmount,
-                CASE WHEN tm.Sign = '-' THEN '-' ELSE '+' END AS termSign
-            FROM tblSOTerm t
-            LEFT JOIN tblSITermMaster tm ON tm.TermID = t.TermID
+                RTRIM(t.TermType)                   AS termType,
+                t.Sno                               AS srNo,
+                t.TermID                            AS termId,
+                tm.TermName                         AS termName,
+                ISNULL(LTRIM(RTRIM(tm.Sign)), '+')  AS termSign,
+                t.Rate                              AS termRate,
+                t.Amount                            AS termAmount
+            FROM tblPOTerm t
+            LEFT JOIN tblPITermMaster tm ON tm.TermID = t.TermID
             WHERE t.OrderID = @orderId
-              AND t.TermType = 'P'
-            ORDER BY t.Sno ASC, t.TermID ASC
+              AND RTRIM(t.TermType) IN ('P', 'B')
+            ORDER BY t.TermType, t.Sno, t.TermID
         `);
 
     const itemTermsBySno = {};
-    for (const row of itemTermsResult.recordset) {
-        if (!itemTermsBySno[row.srNo]) itemTermsBySno[row.srNo] = [];
-        itemTermsBySno[row.srNo].push({
-            termId: row.termId,
-            termName: row.termName,
-            termRate: row.termRate,
-            termAmount: row.termAmount,
-            termSign: row.termSign
-        });
+    const billTerms = [];
+    for (const t of termsResult.recordset) {
+        const term = {
+            termId: t.termId,
+            termName: t.termName,
+            termSign: t.termSign,
+            termRate: t.termRate,
+            termAmount: t.termAmount,
+        };
+        const type = String(t.termType || "").trim();
+        if (type === 'B') {
+            billTerms.push(term);
+        } else if (type === 'P') {
+            (itemTermsBySno[t.srNo] = itemTermsBySno[t.srNo] || []).push(term);
+        }
     }
 
     const lineItems = itemsResult.recordset.map(li => ({
         ...li,
-        itemTerms: itemTermsBySno[li.srNo] || []
+        itemTerms: itemTermsBySno[li.srNo] || [],
     }));
 
-    return {
-        success: true,
-        order: masterResult.recordset[0],
-        lineItems,
-        terms: termsResult.recordset
-    };
+    return { success: true, order: master, lineItems, terms: billTerms };
 };
